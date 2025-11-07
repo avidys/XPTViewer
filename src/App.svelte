@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { invoke } from '@tauri-apps/api/core';
+  import { invoke } from '@tauri-apps/api/tauri';
   import { open } from '@tauri-apps/api/dialog';
   import { onMount } from 'svelte';
   import { createVirtualizer } from '@tanstack/svelte-virtual';
@@ -220,8 +220,9 @@
           <div
             class="grid-body"
             bind:this={tableContainer}
-            role="presentation"
+            role="grid"
             aria-rowcount={selectedDataset.rows.length}
+            aria-colcount={selectedDataset.fields.length}
           >
             <div class="grid-spacer" style={`height: ${totalSize}px;`}>
               {#if rowVirtualizer}
