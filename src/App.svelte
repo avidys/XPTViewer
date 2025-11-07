@@ -2,6 +2,8 @@
   import { invoke } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/api/dialog';
   import { onMount } from 'svelte';
+  import { createVirtualizer } from '@tanstack/svelte-virtual';
+  import type { VirtualItem, Virtualizer } from '@tanstack/virtual-core';
 
   type Field = {
     name: string;
@@ -27,6 +29,15 @@
   let fileData: XptFile | null = null;
   let errorMessage: string | null = null;
   let selectedDatasetIndex = 0;
+  let mounted = false;
+  let tableContainer: HTMLDivElement | null = null;
+  let rowVirtualizer: Virtualizer<HTMLDivElement, Element> | null = null;
+  let datasetKey: string | null = null;
+  let currentDatasetKey: string | null = null;
+  let virtualRows: VirtualItem[] = [];
+  let totalSize = 0;
+  let gridTemplate = '';
+  let rowCount = 0;
 
   const handleOpenFile = async () => {
     errorMessage = null;
@@ -50,12 +61,70 @@
     }
   };
 
-  let mounted = false;
   onMount(() => {
     mounted = true;
   });
 
   $: selectedDataset = fileData?.datasets[selectedDatasetIndex];
+  $: rowCount = selectedDataset?.rows.length ?? 0;
+  $: gridTemplate =
+    selectedDataset && selectedDataset.fields.length > 0
+      ? `repeat(${selectedDataset.fields.length}, minmax(140px, 1fr))`
+      : 'minmax(140px, 1fr)';
+  $: virtualRows = rowVirtualizer ? rowVirtualizer.getVirtualItems() : [];
+  $: totalSize = rowVirtualizer ? rowVirtualizer.getTotalSize() : 0;
+  $: currentDatasetKey = selectedDataset
+    ? `${fileData?.path ?? ''}:${selectedDatasetIndex}`
+    : null;
+
+  $: if (!rowVirtualizer && tableContainer) {
+    rowVirtualizer = createVirtualizer({
+      count: rowCount,
+      getScrollElement: () => tableContainer as HTMLDivElement,
+      estimateSize: () => 44,
+      overscan: 12
+    });
+  }
+
+  $: if (rowVirtualizer) {
+    rowVirtualizer.setOptions((prev) => ({
+      ...prev,
+      count: rowCount
+    }));
+  }
+
+  $: if (rowVirtualizer && datasetKey !== currentDatasetKey) {
+    datasetKey = currentDatasetKey;
+    rowVirtualizer.scrollToOffset(0);
+  }
+
+  function formatValue(value: unknown): string {
+    if (value === null || value === undefined) {
+      return '—';
+    }
+
+    if (typeof value === 'number') {
+      if (Number.isInteger(value)) {
+        return value.toString();
+      }
+      return value.toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+    }
+
+    if (value instanceof Date) {
+      return value.toISOString();
+    }
+
+    if (typeof value === 'object') {
+      return JSON.stringify(value);
+    }
+
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      return trimmed.length > 0 ? trimmed : '—';
+    }
+
+    return String(value);
+  }
 </script>
 
 <main class="app-shell">
@@ -137,61 +206,47 @@
 
       <div class="data-preview">
         <h3>Preview</h3>
-        <p class="hint">Showing up to the first 100 rows.</p>
-        <div class="table-wrapper">
-          <table>
-            <thead>
-              <tr>
-                {#each selectedDataset.fields as field}
-                  <th>{field.name}</th>
+        <p class="hint">
+          Showing {selectedDataset.rows.length.toLocaleString()} row{selectedDataset.rows.length === 1
+            ? ''
+            : 's'}.
+        </p>
+        <div class="data-grid">
+          <div class="grid-row header" style={`grid-template-columns: ${gridTemplate};`} role="row">
+            {#each selectedDataset.fields as field}
+              <div class="grid-cell header-cell" role="columnheader">{field.name}</div>
+            {/each}
+          </div>
+          <div
+            class="grid-body"
+            bind:this={tableContainer}
+            role="presentation"
+            aria-rowcount={selectedDataset.rows.length}
+          >
+            <div class="grid-spacer" style={`height: ${totalSize}px;`}>
+              {#if rowVirtualizer}
+                {#each virtualRows as virtualRow (virtualRow.key)}
+                  {@const row = selectedDataset.rows[virtualRow.index]}
+                  <div
+                    class="grid-row virtual-row"
+                    class:odd={virtualRow.index % 2 === 1}
+                    style={`grid-template-columns: ${gridTemplate}; transform: translateY(${virtualRow.start}px);`}
+                    role="row"
+                    aria-rowindex={virtualRow.index + 1}
+                  >
+                    {#each selectedDataset.fields as field}
+                      <div class="grid-cell" role="gridcell">{formatValue(row[field.name])}</div>
+                    {/each}
+                  </div>
                 {/each}
-              </tr>
-            </thead>
-            <tbody>
-              {#each selectedDataset.rows as row}
-                <tr>
-                  {#each selectedDataset.fields as field}
-                    <td>{formatValue(row[field.name])}</td>
-                  {/each}
-                </tr>
-              {/each}
-            </tbody>
-          </table>
+              {/if}
+            </div>
+          </div>
         </div>
       </div>
     </section>
   {/if}
 </main>
-
-<script lang="ts">
-  function formatValue(value: unknown): string {
-    if (value === null || value === undefined) {
-      return '—';
-    }
-
-    if (typeof value === 'number') {
-      if (Number.isInteger(value)) {
-        return value.toString();
-      }
-      return value.toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
-    }
-
-    if (value instanceof Date) {
-      return value.toISOString();
-    }
-
-  if (typeof value === 'object') {
-    return JSON.stringify(value);
-  }
-
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    return trimmed.length > 0 ? trimmed : '—';
-  }
-
-  return String(value);
-}
-</script>
 
 <style>
   main.app-shell {
@@ -337,8 +392,7 @@
     overflow: hidden;
   }
 
-  .schema table,
-  .data-preview table {
+  .schema table {
     width: 100%;
     border-collapse: collapse;
     background: white;
@@ -347,8 +401,7 @@
     box-shadow: 0 12px 24px rgba(15, 23, 42, 0.08);
   }
 
-  .schema thead,
-  .data-preview thead {
+  .schema thead {
     background: linear-gradient(135deg, #2563eb, #4f46e5);
     color: white;
   }
@@ -371,13 +424,58 @@
     background: rgba(59, 130, 246, 0.08);
   }
 
-  .data-preview .table-wrapper {
-    max-height: 360px;
-    overflow: auto;
+  .data-grid {
     border-radius: 1rem;
+    overflow: hidden;
+    background: white;
+    box-shadow: 0 12px 24px rgba(15, 23, 42, 0.08);
+    border: 1px solid rgba(148, 163, 184, 0.25);
   }
 
-  .data-preview table tr:nth-child(even) {
+  .grid-row {
+    display: grid;
+    gap: 0;
+  }
+
+  .grid-row.header {
+    background: linear-gradient(135deg, #2563eb, #4f46e5);
+    color: white;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .grid-cell {
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.3);
+    font-size: 0.9rem;
+    word-break: break-word;
+  }
+
+  .grid-cell.header-cell {
+    border-bottom: none;
+    font-size: 0.8rem;
+  }
+
+  .grid-body {
+    max-height: 360px;
+    overflow: auto;
+    position: relative;
+  }
+
+  .grid-spacer {
+    position: relative;
+  }
+
+  .grid-row.virtual-row {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    min-height: 44px;
+  }
+
+  .grid-row.virtual-row.odd {
     background: rgba(248, 250, 252, 0.7);
   }
 
@@ -392,7 +490,7 @@
       grid-template-columns: 1fr;
     }
 
-    .data-preview .table-wrapper {
+    .data-preview .grid-body {
       max-height: 240px;
     }
   }
