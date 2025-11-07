@@ -1,0 +1,18 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
+
+:global(body) {
+  margin: 0;
+  background: linear-gradient(135deg, #2563eb 0%, #6366f1 50%, #8b5cf6 100%);
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+:global(#app) {
+  width: 100%;
+}
+
+* {
+  box-sizing: border-box;
+}
