@@ -2,8 +2,8 @@
   import { invoke } from '@tauri-apps/api/tauri';
   import { open } from '@tauri-apps/api/dialog';
   import { onMount } from 'svelte';
-  import { createVirtualizer } from '@tanstack/svelte-virtual';
-  import type { VirtualItem, Virtualizer } from '@tanstack/virtual-core';
+import { createVirtualizer } from '@tanstack/svelte-virtual';
+import type { VirtualItem, Virtualizer } from '@tanstack/virtual-core';
 
   type Field = {
     name: string;
@@ -31,13 +31,18 @@
   let selectedDatasetIndex = 0;
   let mounted = false;
   let tableContainer: HTMLDivElement | null = null;
-  let rowVirtualizer: Virtualizer<HTMLDivElement, Element> | null = null;
+  let rowVirtualizer: ReturnType<typeof createVirtualizer<HTMLDivElement, Element>> | null = null;
   let datasetKey: string | null = null;
   let currentDatasetKey: string | null = null;
   let virtualRows: VirtualItem[] = [];
   let totalSize = 0;
   let gridTemplate = '';
   let rowCount = 0;
+  
+  // Helper to safely access virtualizer
+  function getVirtualizer(): Virtualizer<HTMLDivElement, Element> | null {
+    return rowVirtualizer ? $rowVirtualizer : null;
+  }
 
   const handleOpenFile = async () => {
     errorMessage = null;
@@ -52,6 +57,10 @@
       }
 
       const data = await invoke<XptFile>('load_xpt', { path: selected });
+      console.log('Loaded data:', data);
+      console.log('First dataset:', data?.datasets?.[0]);
+      console.log('First row:', data?.datasets?.[0]?.rows?.[0]);
+      console.log('Fields:', data?.datasets?.[0]?.fields);
       fileData = data;
       selectedDatasetIndex = 0;
     } catch (error) {
@@ -71,8 +80,11 @@
     selectedDataset && selectedDataset.fields.length > 0
       ? `repeat(${selectedDataset.fields.length}, minmax(140px, 1fr))`
       : 'minmax(140px, 1fr)';
-  $: virtualRows = rowVirtualizer ? rowVirtualizer.getVirtualItems() : [];
-  $: totalSize = rowVirtualizer ? rowVirtualizer.getTotalSize() : 0;
+  $: {
+    const v = getVirtualizer();
+    virtualRows = v ? v.getVirtualItems() : [];
+    totalSize = v ? v.getTotalSize() : 0;
+  }
   $: currentDatasetKey = selectedDataset
     ? `${fileData?.path ?? ''}:${selectedDatasetIndex}`
     : null;
@@ -86,16 +98,12 @@
     });
   }
 
-  $: if (rowVirtualizer) {
-    rowVirtualizer.setOptions((prev) => ({
-      ...prev,
-      count: rowCount
-    }));
-  }
-
   $: if (rowVirtualizer && datasetKey !== currentDatasetKey) {
-    datasetKey = currentDatasetKey;
-    rowVirtualizer.scrollToOffset(0);
+    const v = getVirtualizer();
+    if (v) {
+      datasetKey = currentDatasetKey;
+      v.scrollToOffset(0);
+    }
   }
 
   function formatValue(value: unknown): string {

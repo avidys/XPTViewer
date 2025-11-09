@@ -1,11 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod xpt_parser;
+
 use anyhow::{anyhow, Context, Result};
-use readstat::parser::Parser;
-use readstat::{value::Value, ReadStatError, VarType};
 use serde::Serialize;
-use std::{collections::BTreeMap, path::Path, sync::Mutex};
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
 use tauri::Manager;
+use xpt_parser::{XPTParser, VariableType};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -21,6 +24,8 @@ struct FieldMetadata {
 struct DatasetSummary {
     name: String,
     label: Option<String>,
+    created_date: Option<String>,
+    modified_date: Option<String>,
     observation_count: usize,
     fields: Vec<FieldMetadata>,
     rows: Vec<BTreeMap<String, serde_json::Value>>,
@@ -42,107 +47,86 @@ fn load_xpt(path: String) -> Result<XptFilePayload, String> {
 }
 
 fn load_xpt_impl(path: &Path) -> Result<XptFilePayload> {
-    let mut datasets = Vec::new();
+    // Read the file
+    let data = fs::read(path)
+        .with_context(|| format!("Unable to read file: {}", path.display()))?;
 
-    let mut parser = Parser::new()
-        .with_context(|| "Unable to initialise ReadStat parser for SAS XPORT files")?;
-
-    #[derive(Default)]
-    struct ParsingState {
-        dataset_name: Option<String>,
-        dataset_label: Option<String>,
-        fields: Vec<FieldMetadata>,
-        rows: Vec<BTreeMap<String, serde_json::Value>>,
-    }
-
-    let state = Mutex::new(ParsingState::default());
-
-    parser.set_metadata_handler({
-        let state = &state;
-        move |metadata| {
-            let mut state = state.lock().expect("metadata mutex poisoned");
-            if let Some(name) = metadata.table_name() {
-                state.dataset_name = Some(name.to_string());
-            }
-            state.dataset_label = metadata.file_label().map(|label| label.to_string());
-            Ok(())
-        }
-    });
-
-    parser.set_variable_handler({
-        let state = &state;
-        move |variable| {
-            let mut state = state.lock().expect("variable mutex poisoned");
-            let field = FieldMetadata {
-                name: variable.name().to_string(),
-                label: variable.label().map(|label| label.to_string()),
-                kind: match variable.var_type() {
-                    VarType::String => "Character".to_string(),
-                    _ => "Numeric".to_string(),
-                },
-            };
-            state.fields.push(field);
-            Ok(())
-        }
-    });
-
-    parser.set_record_handler({
-        let state = &state;
-        move |record| {
-            let mut state = state.lock().expect("record mutex poisoned");
-            let mut row = BTreeMap::new();
-            for (index, field) in state.fields.iter().enumerate() {
-                let value = record.value(index);
-                row.insert(field.name.clone(), convert_value(&value)?);
-            }
-            state.rows.push(row);
-            Ok(())
-        }
-    });
-
-    parser
-        .read_path(path)
+    // Parse using our XPT parser
+    let suggested_filename = path
+        .file_name()
+        .and_then(|n| n.to_str());
+    
+    let dataset = XPTParser::parse(&data, suggested_filename)
         .with_context(|| format!("Unable to parse SAS XPORT file: {}", path.display()))?;
 
-    let state = state
-        .into_inner()
-        .expect("failed to retrieve parsing state after completion");
+    // Convert to the expected format
+    let fields: Vec<FieldMetadata> = dataset
+        .variables
+        .iter()
+        .map(|var| FieldMetadata {
+            name: var.name.clone(),
+            label: if var.label.is_empty() {
+                None
+            } else {
+                Some(var.label.clone())
+            },
+            kind: match var.var_type {
+                VariableType::Character => "Character".to_string(),
+                VariableType::Numeric => "Numeric".to_string(),
+            },
+        })
+        .collect();
 
-    datasets.push(DatasetSummary {
-        name: state.dataset_name.unwrap_or_else(|| "Dataset".to_string()),
-        label: state.dataset_label,
-        observation_count: state.rows.len(),
-        fields: state.fields,
-        rows: state.rows,
-    });
+    let rows: Vec<BTreeMap<String, serde_json::Value>> = dataset
+        .rows
+        .iter()
+        .map(|row| {
+            let mut map = BTreeMap::new();
+            for (i, value) in row.values.iter().enumerate() {
+                if i < fields.len() {
+                    let field_name = &fields[i].name;
+                    // Convert string values to appropriate JSON types
+                    let json_value = if value.is_empty() {
+                        serde_json::Value::Null
+                    } else if fields[i].kind == "Numeric" {
+                        // Try to parse as number
+                        value
+                            .parse::<f64>()
+                            .ok()
+                            .and_then(|n| serde_json::Number::from_f64(n))
+                            .map(serde_json::Value::Number)
+                            .unwrap_or_else(|| serde_json::Value::String(value.clone()))
+                    } else {
+                        serde_json::Value::String(value.clone())
+                    };
+                    map.insert(field_name.clone(), json_value);
+                }
+            }
+            map
+        })
+        .collect();
+
+    // Debug: log the first row to verify data structure
+    if !rows.is_empty() {
+        eprintln!("First row keys: {:?}", rows[0].keys().collect::<Vec<_>>());
+        eprintln!("First row sample: {:?}", rows[0]);
+    }
+    eprintln!("Total rows: {}, Total fields: {}", rows.len(), fields.len());
+
+    let datasets = vec![DatasetSummary {
+        name: dataset.title,
+        label: None, // XPT format doesn't have dataset-level labels in the same way
+        created_date: dataset.created_date,
+        modified_date: dataset.modified_date,
+        observation_count: dataset.rows.len(),
+        fields,
+        rows,
+    }];
 
     Ok(XptFilePayload {
         path: path.display().to_string(),
         datasets,
     })
-}
-
-fn convert_value(value: &Value) -> Result<serde_json::Value, ReadStatError> {
-    if value.is_system_missing() || value.is_user_missing() {
-        return Ok(serde_json::Value::Null);
-    }
-
-    match value.var_type() {
-        VarType::String => Ok(serde_json::Value::String(
-            value.string().unwrap_or_default().trim_end().to_string(),
-        )),
-        VarType::Numeric => {
-            let number = value.double()?;
-            if number.is_finite() {
-                serde_json::Number::from_f64(number)
-                    .map(serde_json::Value::Number)
-                    .ok_or_else(|| ReadStatError::InvalidData("Invalid numeric value".into()))
-            } else {
-                Ok(serde_json::Value::Null)
-            }
-        }
-        _ => Ok(serde_json::Value::Null),
-    }
 }
 
 fn main() {

@@ -1,6 +1,6 @@
 # XPTViewer
 
-A Tauri + Svelte desktop experience inspired by the classic **xpt4mac** utility. XPTViewer lets you
+A Tauri + Svelte desktop experience inspired by **xpt4mac** utility. XPTViewer lets you
 inspect SAS XPORT (`.xpt`/`.xport`) files, explore dataset metadata, and preview observation data in a
 modern, cross-platform interface.
 
@@ -19,7 +19,7 @@ To produce a release build:
 npm run build
 npm run tauri build
 ```
-
+.
 ## Features
 
 - Native desktop shell powered by Tauri
